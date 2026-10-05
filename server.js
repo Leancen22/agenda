@@ -1,9 +1,10 @@
 // Agenda — coordinación de fecha y hora para reuniones.
-// Servidor sin dependencias: Node >= 18. Datos en $DATA_DIR/data.json (por defecto ./data).
+// Servidor sin dependencias: Node >= 18. Datos en Redis (Upstash) o en $DATA_DIR/data.json; ver store.js.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { createStore } = require('./store');
 
 // Carga .env (si existe) sin pisar variables ya definidas en el entorno.
 try {
@@ -15,31 +16,22 @@ try {
 
 const PORT = Number(process.env.PORT) || 3000;
 const ADMIN_KEY = process.env.ADMIN_KEY || '';
-if (ADMIN_KEY.length < 8) {
-  console.error('Falta ADMIN_KEY (mínimo 8 caracteres). Definila en .env o como variable de entorno.');
-  process.exit(1);
-}
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, 'data'));
-const DATA_FILE = path.join(DATA_DIR, 'data.json');
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-
-// ---------- persistencia ----------
-function load() {
-  try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } catch {
-    return { events: {} };
-  }
+// Errores de configuración: localmente cortan el arranque; en Vercel se informan en cada pedido a la API,
+// porque un proceso que termina sólo deja un 500 genérico.
+const configErrors = [];
+if (ADMIN_KEY.length < 8) configErrors.push('Falta ADMIN_KEY (mínimo 8 caracteres). Definila en .env o como variable de entorno.');
+let store = null;
+try {
+  store = createStore({ dataDir: DATA_DIR });
+} catch (e) {
+  configErrors.push(e.message);
 }
-
-let db = load();
-
-function save() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const tmp = DATA_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db, null, 2));
-  fs.renameSync(tmp, DATA_FILE);
+if (configErrors.length) {
+  configErrors.forEach((m) => console.error(m));
+  if (!process.env.VERCEL) process.exit(1);
 }
 
 // ---------- utilidades de fechas (siempre "YYYY-MM-DD" / "HH:MM", sin zona horaria) ----------
@@ -123,21 +115,21 @@ function applyConfig(ev, body) {
     else if (c && validSlots(ev).has(c.date + 'T' + c.time)) ev.confirmed = { date: c.date, time: c.time };
     else throw new Error('La fecha/hora confirmada no está dentro de los horarios disponibles');
   }
-  // Si cambió la grilla, se descartan selecciones que quedaron fuera.
-  const valid = validSlots(ev);
-  for (const r of Object.values(ev.responses)) r.slots = r.slots.filter((s) => valid.has(s));
-  if (ev.confirmed && !valid.has(ev.confirmed.date + 'T' + ev.confirmed.time)) ev.confirmed = null;
+  // Si cambió la grilla y la fecha confirmada quedó fuera, se anula.
+  if (ev.confirmed && !validSlots(ev).has(ev.confirmed.date + 'T' + ev.confirmed.time)) ev.confirmed = null;
 }
 
 // Vista pública: oculta los tokens; marca con self:true la respuesta de quien consulta.
+// Las selecciones que quedaron fuera de la grilla actual (días u horas quitados) no se muestran.
 // Las sugerencias no se incluyen: sólo las ve el admin (adminEvent).
 function publicEvent(ev, token) {
   const { responses, suggestions, ...rest } = ev;
+  const valid = validSlots(ev);
   return {
     ...rest,
     responses: Object.entries(responses).map(([t, r]) => ({
       name: r.name,
-      slots: r.slots,
+      slots: r.slots.filter((s) => valid.has(s)),
       updatedAt: r.updatedAt,
       ...(token && t === token ? { self: true } : {}),
     })),
@@ -173,6 +165,7 @@ function readBody(req) {
 }
 
 function isAdmin(req) {
+  if (!ADMIN_KEY) return false;
   const key = String(req.headers['x-admin-key'] || '');
   const a = Buffer.from(key);
   const b = Buffer.from(ADMIN_KEY);
@@ -195,18 +188,19 @@ function serveStatic(req, res, pathname) {
 
 async function api(req, res, parts) {
   // parts: ['api', ...]
-  const [, scope, id, sub] = parts;
+  const [, scope, id, sub, subId] = parts;
+  if (configErrors.length) return send(res, 503, { error: configErrors.join(' ') });
 
   // --- público ---
   if (scope === 'events' && id && !sub && req.method === 'GET') {
-    const ev = db.events[id];
+    const ev = await store.get(id);
     if (!ev) return send(res, 404, { error: 'Evento no encontrado' });
     const token = new URL(req.url, 'http://x').searchParams.get('token');
     return send(res, 200, publicEvent(ev, token));
   }
 
   if (scope === 'events' && id && sub === 'response' && req.method === 'PUT') {
-    const ev = db.events[id];
+    const ev = await store.get(id);
     if (!ev) return send(res, 404, { error: 'Evento no encontrado' });
     if (ev.confirmed) return send(res, 409, { error: 'La fecha ya fue confirmada; no se aceptan cambios' });
     const body = await readBody(req);
@@ -217,22 +211,21 @@ async function api(req, res, parts) {
     if (!Array.isArray(body.slots)) return send(res, 400, { error: 'slots debe ser una lista' });
     const valid = validSlots(ev);
     const slots = [...new Set(body.slots)].filter((s) => valid.has(s)).sort();
-    ev.responses[token] = { name, slots, updatedAt: new Date().toISOString() };
-    save();
+    const resp = { name, slots, updatedAt: new Date().toISOString() };
+    await store.setResponse(id, token, resp);
+    ev.responses[token] = resp;
     return send(res, 200, publicEvent(ev, token));
   }
 
   if (scope === 'events' && id && sub === 'suggestions' && req.method === 'POST') {
-    const ev = db.events[id];
+    const ev = await store.get(id);
     if (!ev) return send(res, 404, { error: 'Evento no encontrado' });
     const body = await readBody(req);
     const text = String(body.text || '').trim().slice(0, 1000);
     const name = String(body.name || '').trim().slice(0, 60);
     if (!text) return send(res, 400, { error: 'Escribí tu sugerencia' });
-    ev.suggestions = ev.suggestions || [];
     if (ev.suggestions.length >= 500) return send(res, 429, { error: 'El buzón está lleno' });
-    ev.suggestions.push({ id: crypto.randomBytes(4).toString('hex'), name, text, createdAt: new Date().toISOString() });
-    save();
+    await store.addSuggestion(id, { id: crypto.randomBytes(4).toString('hex'), name, text, createdAt: new Date().toISOString() });
     return send(res, 201, { ok: true });
   }
 
@@ -241,15 +234,15 @@ async function api(req, res, parts) {
     if (!isAdmin(req)) return send(res, 401, { error: 'Clave de administrador incorrecta' });
 
     if (!id && req.method === 'GET') {
-      const list = Object.values(db.events)
-        .map((ev) => ({ id: ev.id, title: ev.title, place: ev.place, startDate: ev.startDate, days: ev.days, confirmed: ev.confirmed, responses: Object.keys(ev.responses).length, suggestions: (ev.suggestions || []).length, createdAt: ev.createdAt }))
+      const list = (await store.list())
+        .map(({ config: c, responses, suggestions }) => ({ id: c.id, title: c.title, place: c.place, startDate: c.startDate, days: c.days, confirmed: c.confirmed, responses, suggestions, createdAt: c.createdAt }))
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       return send(res, 200, list);
     }
 
     if (!id && req.method === 'POST') {
       const body = await readBody(req);
-      const ev = {
+      const config = {
         id: crypto.randomBytes(5).toString('hex'),
         title: 'Reunión',
         place: '',
@@ -260,39 +253,34 @@ async function api(req, res, parts) {
         dayEnd: '18:00',
         disabledDates: [],
         confirmed: null,
-        responses: {},
-        suggestions: [],
         createdAt: new Date().toISOString(),
       };
-      applyConfig(ev, body);
-      db.events[ev.id] = ev;
-      save();
-      return send(res, 201, adminEvent(ev));
+      applyConfig(config, body);
+      await store.saveConfig(config);
+      return send(res, 201, adminEvent({ ...config, responses: {}, suggestions: [] }));
     }
 
-    const ev = db.events[id];
+    const ev = await store.get(id);
     if (!ev) return send(res, 404, { error: 'Evento no encontrado' });
 
     if (!sub && req.method === 'GET') return send(res, 200, adminEvent(ev));
 
-    if (sub === 'suggestions' && parts[4] && req.method === 'DELETE') {
-      ev.suggestions = (ev.suggestions || []).filter((s) => s.id !== parts[4]);
-      save();
+    if (sub === 'suggestions' && subId && req.method === 'DELETE') {
+      await store.removeSuggestion(id, subId);
+      ev.suggestions = ev.suggestions.filter((s) => s.id !== subId);
       return send(res, 200, adminEvent(ev));
     }
 
     if (!sub && req.method === 'PUT') {
       const body = await readBody(req);
-      const draft = structuredClone(ev);
-      applyConfig(draft, body);
-      db.events[id] = draft;
-      save();
-      return send(res, 200, adminEvent(draft));
+      const { responses, suggestions, ...config } = ev;
+      applyConfig(config, body);
+      await store.saveConfig(config);
+      return send(res, 200, adminEvent({ ...config, responses, suggestions }));
     }
 
     if (!sub && req.method === 'DELETE') {
-      delete db.events[id];
-      save();
+      await store.remove(id);
       return send(res, 200, { ok: true });
     }
   }
@@ -314,4 +302,5 @@ http
   })
   .listen(PORT, () => {
     console.log(`Agenda escuchando en http://localhost:${PORT}  (admin: http://localhost:${PORT}/admin)`);
+    if (store) console.log('Datos en: ' + store.kind);
   });

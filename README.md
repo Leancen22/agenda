@@ -28,12 +28,24 @@ Por variables de entorno o en `.env` (no se sube al repositorio):
 | `ADMIN_KEY` | —           | **Obligatoria**, mínimo 8 caracteres.         |
 | `PORT`      | `3000`      | Puerto HTTP.                                  |
 | `DATA_DIR`  | `./data`    | Carpeta donde se guarda `data.json`.          |
+| `KV_REST_API_URL` / `KV_REST_API_TOKEN` | — | Si están definidas, los datos van a Redis (Upstash) en vez de a `data.json`. También se aceptan `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`. |
 
-Toda la información (eventos, respuestas, sugerencias) vive en `$DATA_DIR/data.json`.
+Sin Redis, toda la información (eventos, respuestas, sugerencias) vive en `$DATA_DIR/data.json`.
 
 ## Despliegue
 
 Siempre detrás de **HTTPS**: la clave de admin viaja en cada pedido.
+
+### Vercel
+
+Vercel no tiene disco persistente, así que ahí los datos van a Redis:
+
+1. En el proyecto de Vercel: **Storage → Create Database → Upstash (Redis)**, plan gratuito, y conectala
+   al proyecto. Eso define `KV_REST_API_URL` y `KV_REST_API_TOKEN` automáticamente.
+2. **Settings → Environment Variables:** agregá `ADMIN_KEY` con tu clave.
+3. Volvé a desplegar (push al repo, o **Deployments → Redeploy**). Las variables nuevas sólo se aplican en un despliegue nuevo.
+
+Si falta algo, la API responde con un mensaje que dice qué falta.
 
 ### Servidor propio (VM / VPS)
 
@@ -63,6 +75,8 @@ elegí el repositorio y cargá `ADMIN_KEY` cuando lo pida. El disco requiere pla
 se pierden en cada despliegue.
 
 ## Respaldos
+
+Con Redis (Upstash), los respaldos se manejan desde el panel de Upstash. Con archivo:
 
 `scripts/backup.sh [DATA_DIR] [BACKUP_DIR]` copia `data.json` con fecha y conserva las últimas 30 copias.
 Ejemplo con cron, todos los días a las 3:00:
