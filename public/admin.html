@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agenda · Admin</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <!-- Login -->
+    <div id="login" class="card hidden" style="max-width:380px;margin:60px auto">
+      <h1>Agenda · Admin</h1>
+      <form id="loginForm">
+        <div class="field">
+          <label for="key">Clave de administrador</label>
+          <input id="key" type="password" autocomplete="current-password" required />
+        </div>
+        <button class="primary">Entrar</button>
+        <span class="error small" id="loginErr"></span>
+      </form>
+    </div>
+
+    <div id="app" class="hidden">
+      <div class="row" style="justify-content:space-between;margin-bottom:16px">
+        <h1>Agenda · Admin</h1>
+        <div class="row">
+          <button class="primary" id="newEvent">+ Nuevo evento</button>
+          <button id="logout">Salir</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Eventos</h2>
+        <ul class="list" id="events"></ul>
+      </div>
+
+      <div id="detail" class="hidden">
+        <div id="confirmedBanner" class="banner ok hidden"></div>
+
+        <div class="card">
+          <div class="row" style="justify-content:space-between">
+            <h2 style="margin:0">Configuración</h2>
+            <button class="danger" id="delete">Eliminar evento</button>
+          </div>
+          <p class="small muted">Enlace para los participantes:</p>
+          <div class="row" style="margin-bottom:16px">
+            <code class="share" id="shareLink"></code>
+            <button id="copy">Copiar</button>
+          </div>
+          <form id="cfg">
+            <div class="row">
+              <div class="field"><label>Título</label><input name="title" required maxlength="120" /></div>
+              <div class="field"><label>Lugar</label><input name="place" maxlength="200" placeholder="Ej.: Sala 3, Oficinas Centro" /></div>
+            </div>
+            <div class="field"><label>Descripción (opcional)</label><textarea name="description" maxlength="1000"></textarea></div>
+            <div class="row">
+              <div class="field"><label>Desde</label><input name="startDate" type="date" required /></div>
+              <div class="field"><label>Cantidad de días</label>
+                <select name="days">
+                  <option value="7">1 semana</option>
+                  <option value="14">2 semanas</option>
+                  <option value="21">3 semanas</option>
+                  <option value="28">4 semanas</option>
+                </select>
+              </div>
+              <div class="field"><label>Horario desde</label><input name="dayStart" type="time" step="3600" required /></div>
+              <div class="field"><label>Horario hasta</label><input name="dayEnd" type="time" step="3600" required /></div>
+            </div>
+            <div class="row">
+              <button class="primary">Guardar configuración</button>
+              <span class="status" id="cfgStatus"></span>
+            </div>
+            <p class="small muted" style="margin-bottom:0">Si achicás el rango de días u horas, se descartan las selecciones que queden fuera.</p>
+          </form>
+        </div>
+
+        <div class="grid-2">
+          <div class="card">
+            <h2>Días disponibles</h2>
+            <p class="small muted">Tocá un día para habilitarlo o deshabilitarlo para los participantes.</p>
+            <div id="cal"></div>
+            <div class="row" style="margin-top:10px">
+              <button class="link" id="weekdaysOnly">Sólo lunes a viernes</button>
+              <button class="link" id="enableAll">Habilitar todos</button>
+            </div>
+          </div>
+          <div class="card">
+            <h2>Mejores opciones</h2>
+            <ul class="list" id="best"></ul>
+            <h3 style="margin-top:18px">Participantes (<span id="nResp">0</span>)</h3>
+            <ul class="list small" id="people"></ul>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Cuadrar fecha y hora</h2>
+          <p class="small muted">Cada celda muestra cuántas personas pueden. Tocá una para ver quiénes y confirmarla.</p>
+          <div class="heat-wrap"><table class="heat" id="heat"></table></div>
+          <div class="legend">
+            <span style="--c:color-mix(in srgb, var(--accent) 15%, var(--surface))">Pocos</span>
+            <span style="--c:var(--accent)">Todos</span>
+            <span style="--c:var(--mine)">Confirmada</span>
+          </div>
+          <div id="pick" class="card hidden" style="margin:16px 0 0;background:var(--surface-2)"></div>
+        </div>
+
+        <div class="card">
+          <h2>Buzón de sugerencias (<span id="nSug">0</span>)</h2>
+          <ul class="list" id="suggestions"></ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/common.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let key = '';
+    try { key = sessionStorage.getItem('agenda-admin') || ''; } catch {}
+    let events = [];
+    let ev = null;
+    let pick = null; // { date, time }
+
+    const adm = (method, url, body) => api(method, '/api/admin' + url, body, { 'x-admin-key': key });
+
+    function showLogin(msg) {
+      $('app').classList.add('hidden');
+      $('login').classList.remove('hidden');
+      $('loginErr').textContent = msg || '';
+    }
+
+    $('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      key = $('key').value;
+      try {
+        await loadEvents();
+        try { sessionStorage.setItem('agenda-admin', key); } catch {}
+        $('login').classList.add('hidden');
+        $('app').classList.remove('hidden');
+      } catch (err) {
+        showLogin(err.message);
+      }
+    });
+    $('logout').addEventListener('click', () => {
+      try { sessionStorage.removeItem('agenda-admin'); } catch {}
+      key = '';
+      showLogin();
+    });
+
+    async function loadEvents() {
+      events = await adm('GET', '');
+      renderEvents();
+    }
+
+    function renderEvents() {
+      $('events').innerHTML = events.length
+        ? events.map((e) => `<li class="${ev && ev.id === e.id ? 'current' : ''}">
+            <span><button class="link" data-id="${e.id}">${esc(e.title)}</button>
+            <span class="small muted">${e.place ? esc(e.place) + ' · ' : ''}${fmtDay(e.startDate)} · ${e.days} días</span></span>
+            <span class="small ${e.confirmed ? '' : 'muted'}">${e.confirmed ? '✓ ' + fmtDay(e.confirmed.date) + ' ' + e.confirmed.time : e.responses + ' respuesta' + (e.responses === 1 ? '' : 's')}${e.suggestions ? ' · 💬 ' + e.suggestions : ''}</span>
+          </li>`).join('')
+        : '<li class="muted small">No hay eventos. Creá uno con “+ Nuevo evento”.</li>';
+      $('events').querySelectorAll('button[data-id]').forEach((b) => b.addEventListener('click', () => openEvent(b.dataset.id)));
+    }
+
+    async function openEvent(id) {
+      ev = await adm('GET', '/' + id);
+      pick = ev.confirmed ? { ...ev.confirmed } : null;
+      history.replaceState(null, '', '?e=' + id);
+      fillForm();
+      render();
+      renderEvents();
+      $('detail').classList.remove('hidden');
+    }
+
+    async function update(patch) {
+      ev = await adm('PUT', '/' + ev.id, patch);
+      render();
+      loadEvents();
+    }
+
+    $('newEvent').addEventListener('click', async () => {
+      // Por defecto: próximas dos semanas desde el lunes siguiente, de lunes a viernes.
+      const today = new Date().toISOString().slice(0, 10);
+      const start = addDays(today, 7 - weekday(today));
+      const disabledDates = [];
+      for (let i = 0; i < 14; i++) if (weekday(addDays(start, i)) >= 5) disabledDates.push(addDays(start, i));
+      const created = await adm('POST', '', { title: 'Nueva reunión', startDate: start, days: 14, disabledDates });
+      await loadEvents();
+      await openEvent(created.id);
+      document.querySelector('#cfg [name=title]').select();
+    });
+
+    $('delete').addEventListener('click', async () => {
+      if (!confirm(`¿Eliminar “${ev.title}” y todas sus respuestas? No se puede deshacer.`)) return;
+      await adm('DELETE', '/' + ev.id);
+      ev = null;
+      history.replaceState(null, '', location.pathname);
+      $('detail').classList.add('hidden');
+      loadEvents();
+    });
+
+    function fillForm() {
+      const f = $('cfg');
+      for (const k of ['title', 'place', 'description', 'startDate', 'dayStart', 'dayEnd']) f[k].value = ev[k];
+      if (![...f.days.options].some((o) => o.value === String(ev.days))) f.days.add(new Option(ev.days + ' días', ev.days));
+      f.days.value = String(ev.days);
+      $('cfgStatus').textContent = '';
+    }
+
+    $('cfg').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const f = e.target;
+      const patch = {
+        title: f.title.value, place: f.place.value, description: f.description.value,
+        startDate: f.startDate.value, days: Number(f.days.value),
+        dayStart: f.dayStart.value, dayEnd: f.dayEnd.value,
+      };
+      try {
+        await update(patch);
+        $('cfgStatus').textContent = '✓ Guardado';
+        $('cfgStatus').className = 'status';
+      } catch (err) {
+        $('cfgStatus').textContent = err.message;
+        $('cfgStatus').className = 'status error';
+      }
+    });
+
+    $('copy').addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText($('shareLink').textContent);
+        $('copy').textContent = '✓ Copiado';
+      } catch {
+        $('copy').textContent = 'Copialo a mano';
+      }
+      setTimeout(() => ($('copy').textContent = 'Copiar'), 1500);
+    });
+
+    $('weekdaysOnly').addEventListener('click', () => update({ disabledDates: eventDates(ev).filter((d) => weekday(d) >= 5) }));
+    $('enableAll').addEventListener('click', () => update({ disabledDates: [] }));
+
+    function render() {
+      $('shareLink').textContent = location.origin + '/?e=' + ev.id;
+      const idx = slotIndex(ev);
+      const times = eventTimes(ev);
+      const dates = enabledDates(ev);
+      const off = new Set(ev.disabledDates);
+      const total = ev.responses.length;
+
+      // Banner de confirmación
+      $('confirmedBanner').classList.toggle('hidden', !ev.confirmed);
+      if (ev.confirmed) {
+        $('confirmedBanner').innerHTML = `<div class="row" style="justify-content:space-between">
+          <span><strong>Confirmada:</strong> ${fmtLong(ev.confirmed.date)}, ${ev.confirmed.time} hs${ev.place ? ' · ' + esc(ev.place) : ''}.
+          Los participantes ya no pueden modificar su disponibilidad.</span>
+          <button id="unconfirm">Reabrir</button></div>`;
+        $('unconfirm').addEventListener('click', () => update({ confirmed: null }));
+      }
+
+      // Calendario de días habilitados
+      renderCalendar($('cal'), ev, {
+        cell(d) {
+          if (off.has(d)) return { cls: 'off', html: '<span class="cal-tag">cerrado</span>', title: 'Tocá para habilitar' };
+          const people = new Set();
+          times.forEach((t) => (idx.get(d + 'T' + t) || []).forEach((n) => people.add(n)));
+          return {
+            cls: ev.confirmed?.date === d ? 'confirmed' : '',
+            html: `<span class="cal-tag">${people.size}/${total}</span><span class="cal-bar"><i style="width:${total ? (people.size / total) * 100 : 0}%"></i></span>`,
+            title: 'Tocá para deshabilitar',
+          };
+        },
+        onClick(d) {
+          const s = new Set(ev.disabledDates);
+          s.has(d) ? s.delete(d) : s.add(d);
+          update({ disabledDates: [...s] });
+        },
+      });
+
+      // Mejores opciones
+      const ranked = [];
+      for (const d of dates) for (const t of times) {
+        const n = (idx.get(d + 'T' + t) || []).length;
+        if (n) ranked.push({ date: d, time: t, n });
+      }
+      ranked.sort((a, b) => b.n - a.n || (a.date + a.time).localeCompare(b.date + b.time));
+      $('best').innerHTML = ranked.length
+        ? ranked.slice(0, 5).map((r) => `<li><button class="link" data-d="${r.date}" data-t="${r.time}">${fmtDay(r.date)} · ${r.time} hs</button>
+            <span class="small">${r.n}/${total}${r.n === total ? ' ✓ todos' : ''}</span></li>`).join('')
+        : '<li class="muted small">Todavía no hay respuestas.</li>';
+      $('best').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => selectSlot(b.dataset.d, b.dataset.t)));
+
+      // Participantes
+      $('nResp').textContent = total;
+      $('people').innerHTML = total
+        ? ev.responses.map((r) => `<li><span>${esc(r.name)}</span><span class="muted">${r.slots.length} horario${r.slots.length === 1 ? '' : 's'} · ${new Date(r.updatedAt).toLocaleString('es')}</span></li>`).join('')
+        : '<li class="muted">Compartí el enlace para empezar a recibir respuestas.</li>';
+
+      // Mapa de calor: filas = horarios, columnas = días habilitados
+      if (!dates.length) {
+        $('heat').innerHTML = '<tr><td class="muted small">No hay días habilitados.</td></tr>';
+      } else {
+        let html = '<thead><tr><th></th>' + dates.map((d) => `<th>${fmtDay(d)}</th>`).join('') + '</tr></thead><tbody>';
+        for (const t of times) {
+          html += `<tr><th class="time">${t}</th>`;
+          for (const d of dates) {
+            const names = idx.get(d + 'T' + t) || [];
+            const p = total ? names.length / total : 0;
+            const cls = ['hcell', p > 0.55 && 'strong', pick && pick.date === d && pick.time === t && 'sel',
+              ev.confirmed && ev.confirmed.date === d && ev.confirmed.time === t && 'confirmed'].filter(Boolean).join(' ');
+            html += `<td><button type="button" class="${cls}" style="--p:${p.toFixed(3)}" data-d="${d}" data-t="${t}"
+              title="${esc(`${fmtDay(d)} ${t} — ${names.length ? names.join(', ') : 'nadie'}`)}">${names.length || ''}</button></td>`;
+          }
+          html += '</tr>';
+        }
+        $('heat').innerHTML = html + '</tbody>';
+        $('heat').querySelectorAll('.hcell').forEach((b) => b.addEventListener('click', () => selectSlot(b.dataset.d, b.dataset.t)));
+      }
+
+      renderPick(idx);
+
+      // Sugerencias (más recientes primero)
+      const sug = [...ev.suggestions].reverse();
+      $('nSug').textContent = sug.length;
+      $('suggestions').innerHTML = sug.length
+        ? sug.map((s) => `<li style="align-items:flex-start"><div>
+            <div style="white-space:pre-wrap">${esc(s.text)}</div>
+            <div class="small muted">${s.name ? esc(s.name) : 'Anónimo'} · ${new Date(s.createdAt).toLocaleString('es')}</div></div>
+            <button class="link danger small" data-sid="${s.id}">Quitar</button></li>`).join('')
+        : '<li class="muted small">Todavía no hay sugerencias.</li>';
+      $('suggestions').querySelectorAll('button[data-sid]').forEach((b) => b.addEventListener('click', async () => {
+        if (!confirm('¿Quitar esta sugerencia?')) return;
+        ev = await adm('DELETE', `/${ev.id}/suggestions/${b.dataset.sid}`);
+        render();
+        loadEvents();
+      }));
+    }
+
+    function selectSlot(date, time) {
+      pick = { date, time };
+      render();
+      $('pick').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    function renderPick(idx) {
+      const box = $('pick');
+      if (!pick || !ev.disabledDates || ev.disabledDates.includes(pick.date) || !eventTimes(ev).includes(pick.time)) {
+        box.classList.add('hidden');
+        return;
+      }
+      const yes = idx.get(pick.date + 'T' + pick.time) || [];
+      const no = ev.responses.map((r) => r.name).filter((n) => !yes.includes(n));
+      const isConfirmed = ev.confirmed && ev.confirmed.date === pick.date && ev.confirmed.time === pick.time;
+      box.innerHTML = `
+        <h3>${fmtLong(pick.date)} · ${pick.time} hs</h3>
+        <p class="small" style="margin:0 0 6px"><strong>Pueden (${yes.length}):</strong></p>
+        <div class="chips" style="margin-bottom:10px">${yes.map((n) => `<span class="chip mine">${esc(n)}</span>`).join('') || '<span class="muted small">nadie</span>'}</div>
+        <p class="small" style="margin:0 0 6px"><strong>No marcaron este horario (${no.length}):</strong></p>
+        <div class="chips" style="margin-bottom:14px">${no.map((n) => `<span class="chip">${esc(n)}</span>`).join('') || '<span class="muted small">—</span>'}</div>
+        ${isConfirmed ? '<strong style="color:var(--mine)">✓ Esta es la fecha confirmada</strong>'
+          : '<button class="primary" id="confirmPick">Confirmar esta fecha y hora</button>'}`;
+      box.classList.remove('hidden');
+      const btn = $('confirmPick');
+      if (btn) btn.addEventListener('click', () => {
+        if (confirm(`¿Confirmar el ${fmtLong(pick.date)} a las ${pick.time}? Los participantes verán la fecha y no podrán cambiar su disponibilidad.`)) {
+          update({ confirmed: pick });
+        }
+      });
+    }
+
+    // Arranque
+    (async () => {
+      if (!key) return showLogin();
+      try {
+        await loadEvents();
+        $('app').classList.remove('hidden');
+        const id = new URLSearchParams(location.search).get('e');
+        if (id && events.some((e) => e.id === id)) openEvent(id);
+      } catch (err) {
+        showLogin(err.message);
+      }
+    })();
+  </script>
+</body>
+</html>

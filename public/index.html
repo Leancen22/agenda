@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Agenda</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <div id="empty" class="card hidden">
+      <h1>Agenda</h1>
+      <p class="muted">Abrí el enlace que te compartió el organizador para indicar tu disponibilidad.</p>
+    </div>
+
+    <div id="app" class="hidden">
+      <header style="margin-bottom:16px">
+        <h1 id="title"></h1>
+        <dl class="info">
+          <div id="placeRow"><dt>Lugar</dt><dd id="place"></dd></div>
+          <div><dt>Fechas</dt><dd id="dates"></dd></div>
+          <div><dt>Horario</dt><dd id="hours"></dd></div>
+        </dl>
+        <p id="desc" class="hidden"></p>
+      </header>
+
+      <div id="confirmed" class="banner ok hidden"></div>
+
+      <div class="card">
+        <div class="row" style="align-items:flex-end">
+          <div class="field" style="max-width:320px;margin-bottom:0">
+            <label for="name">Tu nombre</label>
+            <input id="name" maxlength="60" placeholder="Ej.: Ana Pérez" autocomplete="name" />
+          </div>
+          <button class="primary" id="save">Guardar disponibilidad</button>
+          <span class="status" id="status"></span>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2>1. Elegí un día</h2>
+          <div id="cal"></div>
+          <div class="legend">
+            <span style="--c:var(--mine)">✓ tus horarios ese día</span>
+            <span style="--c:var(--accent)">👥 otras personas que pueden</span>
+            <span style="--c:var(--surface-2)">No disponible</span>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2 id="slotsTitle">2. Elegí los horarios que te convienen</h2>
+          <p class="muted small" id="slotsHint">Seleccioná un día del calendario.</p>
+          <div class="row hidden" id="dayActions" style="margin-bottom:10px">
+            <button class="link" id="allDay">Todo el día</button>
+            <button class="link" id="noneDay">Ninguno</button>
+          </div>
+          <div class="slots" id="slots"></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <h2>Tu selección</h2>
+          <div id="mine" class="muted small">Todavía no marcaste horarios.</div>
+        </div>
+        <div class="card">
+          <h2>Ya respondieron</h2>
+          <div id="others" class="chips"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Buzón de sugerencias</h2>
+        <p class="muted small">¿Algún comentario?</p>
+        <form id="suggest">
+          <div class="field"><textarea id="suggestText" maxlength="1000" placeholder="Escribí tu sugerencia…" required></textarea></div>
+          <div class="row">
+            <button class="primary">Enviar sugerencia</button>
+            <span class="status" id="suggestStatus"></span>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script src="/common.js"></script>
+  <script>
+    const eventId = new URLSearchParams(location.search).get('e');
+    const tokenKey = 'agenda-token-' + eventId;
+    let token = null;
+    try { token = localStorage.getItem(tokenKey); } catch {}
+    if (!token) {
+      token = crypto.randomUUID();
+      try { localStorage.setItem(tokenKey, token); } catch {}
+    }
+
+    let ev = null;
+    let mine = new Set();     // slots propios "YYYY-MM-DDTHH:MM"
+    let activeDate = null;
+    let dirty = false;
+
+    const $ = (id) => document.getElementById(id);
+
+    function setDirty(v) {
+      dirty = v;
+      $('status').textContent = v ? 'Cambios sin guardar' : '';
+      $('status').className = 'status' + (v ? ' dirty' : '');
+    }
+
+    // Respuestas de los demás (la propia viene del estado local, aún sin guardar).
+    function othersIndex() {
+      return slotIndex({ ...ev, responses: ev.responses.filter((r) => !r.self) });
+    }
+
+    function render() {
+      $('title').textContent = ev.title;
+      const dates = eventDates(ev);
+      $('place').textContent = ev.place;
+      $('placeRow').classList.toggle('hidden', !ev.place);
+      $('dates').textContent = `${fmtDay(dates[0])} al ${fmtDay(dates[dates.length - 1])}`;
+      $('hours').textContent = `${ev.dayStart} a ${ev.dayEnd} hs`;
+      $('desc').textContent = ev.description;
+      $('desc').classList.toggle('hidden', !ev.description);
+
+      const locked = !!ev.confirmed;
+      if (locked) {
+        $('confirmed').innerHTML = `<strong>Fecha confirmada:</strong> ${fmtLong(ev.confirmed.date)}, a las ${ev.confirmed.time} hs` +
+          (ev.place ? ` en ${esc(ev.place)}` : '') + '.';
+      }
+      $('confirmed').classList.toggle('hidden', !locked);
+      $('save').disabled = locked;
+      $('name').disabled = locked;
+
+      const idx = othersIndex();
+      const off = new Set(ev.disabledDates);
+      const times = eventTimes(ev);
+      const total = ev.responses.length || 1;
+
+      renderCalendar($('cal'), ev, {
+        cell(d) {
+          if (off.has(d)) return { cls: 'off', clickable: false, title: 'No disponible' };
+          const myCount = times.filter((t) => mine.has(d + 'T' + t)).length;
+          const people = new Set();
+          times.forEach((t) => (idx.get(d + 'T' + t) || []).forEach((n) => people.add(n)));
+          const cls = [d === activeDate && 'active', myCount && 'has-mine', ev.confirmed?.date === d && 'confirmed'].filter(Boolean).join(' ');
+          let html = '';
+          if (myCount) html += `<span class="cal-tag mine">✓ ${myCount}</span>`;
+          if (people.size) html += `<span class="cal-tag">👥 ${people.size}</span>`;
+          html += `<span class="cal-bar"><i style="width:${(people.size / total) * 100}%"></i></span>`;
+          return { cls, html, title: people.size ? 'Pueden: ' + [...people].join(', ') : '' };
+        },
+        onClick(d) {
+          activeDate = d;
+          render();
+        },
+      });
+
+      // Horarios del día activo
+      $('dayActions').classList.toggle('hidden', !activeDate || locked);
+      if (!activeDate) {
+        $('slots').innerHTML = '';
+      } else {
+        $('slotsTitle').textContent = '2. Horarios del ' + fmtDay(activeDate);
+        $('slotsHint').textContent = locked ? 'La fecha ya fue confirmada.' : '¿En qué horario podrías asistir?';
+        $('slots').innerHTML = times.map((t) => {
+          const key = activeDate + 'T' + t;
+          const names = idx.get(key) || [];
+          return `<button type="button" class="slot ${mine.has(key) ? 'on' : ''}" data-key="${key}" ${locked ? 'disabled' : ''}
+            title="${esc(names.length ? 'Pueden: ' + names.join(', ') : 'Nadie más marcó este horario')}">
+            <span>${t}</span><span class="cnt">${names.length ? '👥 ' + names.length : ''}</span></button>`;
+        }).join('');
+        $('slots').querySelectorAll('.slot').forEach((b) => b.addEventListener('click', () => {
+          const k = b.dataset.key;
+          mine.has(k) ? mine.delete(k) : mine.add(k);
+          setDirty(true);
+          render();
+        }));
+      }
+
+      // Resumen propio
+      const byDay = {};
+      [...mine].sort().forEach((s) => {
+        const [d, t] = s.split('T');
+        (byDay[d] = byDay[d] || []).push(t);
+      });
+      const days = Object.keys(byDay);
+      $('mine').innerHTML = days.length
+        ? days.map((d) => `<div style="margin-bottom:8px"><strong>${fmtDay(d)}</strong><div class="chips" style="margin-top:4px">${byDay[d].map((t) => `<span class="chip mine">${t}</span>`).join('')}</div></div>`).join('')
+        : 'Todavía no marcaste horarios.';
+      $('mine').className = days.length ? '' : 'muted small';
+
+      $('others').innerHTML = ev.responses.length
+        ? ev.responses.map((r) => `<span class="chip ${r.self ? 'mine' : ''}">${esc(r.name)}${r.self ? ' (vos)' : ''} · ${r.slots.length}</span>`).join('')
+        : '<span class="muted small">Nadie respondió todavía.</span>';
+    }
+
+    $('allDay').addEventListener('click', () => {
+      eventTimes(ev).forEach((t) => mine.add(activeDate + 'T' + t));
+      setDirty(true);
+      render();
+    });
+    $('noneDay').addEventListener('click', () => {
+      eventTimes(ev).forEach((t) => mine.delete(activeDate + 'T' + t));
+      setDirty(true);
+      render();
+    });
+    $('name').addEventListener('input', () => setDirty(true));
+
+    $('save').addEventListener('click', async () => {
+      const name = $('name').value.trim();
+      if (!name) {
+        $('status').textContent = 'Ingresá tu nombre antes de guardar.';
+        $('status').className = 'status error';
+        $('name').focus();
+        return;
+      }
+      $('save').disabled = true;
+      try {
+        ev = await api('PUT', `/api/events/${eventId}/response`, { token, name, slots: [...mine] });
+        setDirty(false);
+        $('status').textContent = '✓ Guardado';
+        render();
+      } catch (e) {
+        $('status').textContent = e.message;
+        $('status').className = 'status error';
+      } finally {
+        $('save').disabled = !!ev.confirmed;
+      }
+    });
+
+    $('suggest').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = e.target.querySelector('button');
+      btn.disabled = true;
+      try {
+        await api('POST', `/api/events/${eventId}/suggestions`, { name: $('name').value.trim(), text: $('suggestText').value });
+        $('suggestText').value = '';
+        $('suggestStatus').textContent = '✓ ¡Gracias! Tu sugerencia fue enviada.';
+        $('suggestStatus').className = 'status';
+      } catch (err) {
+        $('suggestStatus').textContent = err.message;
+        $('suggestStatus').className = 'status error';
+      } finally {
+        btn.disabled = false;
+      }
+    });
+
+    window.addEventListener('beforeunload', (e) => { if (dirty) e.preventDefault(); });
+
+    async function init() {
+      if (!eventId) return $('empty').classList.remove('hidden');
+      try {
+        ev = await api('GET', `/api/events/${eventId}?token=${encodeURIComponent(token)}`);
+        const own = ev.responses.find((r) => r.self);
+        if (own) {
+          mine = new Set(own.slots);
+          $('name').value = own.name;
+        }
+        activeDate = ev.confirmed?.date || enabledDates(ev)[0] || null;
+        $('app').classList.remove('hidden');
+        document.title = ev.title + ' · Agenda';
+        render();
+      } catch (e) {
+        $('empty').classList.remove('hidden');
+        $('empty').querySelector('p').textContent = e.message;
+      }
+    }
+    init();
+  </script>
+</body>
+</html>

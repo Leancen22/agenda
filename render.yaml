@@ -1,0 +1,18 @@
+# Render (https://render.com): New > Blueprint > elegir este repositorio.
+# El disco persistente requiere un plan pago (Starter); sin disco, los datos se pierden en cada despliegue.
+services:
+  - type: web
+    name: agenda
+    runtime: node
+    plan: starter
+    buildCommand: "true"
+    startCommand: node server.js
+    envVars:
+      - key: ADMIN_KEY
+        sync: false   # Render la pide al crear el servicio; no queda en el repo
+      - key: DATA_DIR
+        value: /var/data
+    disk:
+      name: agenda-data
+      mountPath: /var/data
+      sizeGB: 1

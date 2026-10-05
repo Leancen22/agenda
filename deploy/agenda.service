@@ -1,0 +1,22 @@
+# systemd: copiar a /etc/systemd/system/agenda.service y ajustar rutas/usuario.
+#   sudo systemctl daemon-reload && sudo systemctl enable --now agenda
+[Unit]
+Description=Agenda - coordinación de reuniones
+After=network.target
+
+[Service]
+Type=simple
+User=agenda
+WorkingDirectory=/opt/agenda
+# La clave va en /opt/agenda/.env (ADMIN_KEY=...), con permisos 600.
+Environment=PORT=3000
+Environment=DATA_DIR=/var/lib/agenda
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/agenda
+
+[Install]
+WantedBy=multi-user.target
