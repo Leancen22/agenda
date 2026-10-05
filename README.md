@@ -1,4 +1,4 @@
-# Agenda
+# Agendas
 
 Coordinación de fecha y hora para una reunión entre grupos. Sin dependencias: sólo Node.js ≥ 18.
 
