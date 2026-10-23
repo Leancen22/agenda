@@ -1,4 +1,4 @@
-// Agenda — coordinación de fecha y hora para reuniones.
+// Agenda — coordinación de fecha para reuniones.
 // Servidor sin dependencias: Node >= 18. Datos en Redis (Upstash) o en $DATA_DIR/data.json; ver store.js.
 const http = require('http');
 const fs = require('fs');
@@ -37,22 +37,11 @@ if (configErrors.length) {
 // ---------- utilidades de fechas (siempre "YYYY-MM-DD" / "HH:MM", sin zona horaria) ----------
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
-// Los horarios elegibles son horas de inicio cada STEP minutos dentro del rango del evento.
-const STEP = 60;
 
 function addDays(date, n) {
   const d = new Date(date + 'T00:00:00Z');
   d.setUTCDate(d.getUTCDate() + n);
   return d.toISOString().slice(0, 10);
-}
-
-function toMin(t) {
-  const [h, m] = t.split(':').map(Number);
-  return h * 60 + m;
-}
-
-function toTime(min) {
-  return String(Math.floor(min / 60)).padStart(2, '0') + ':' + String(min % 60).padStart(2, '0');
 }
 
 function eventDates(ev) {
@@ -61,22 +50,23 @@ function eventDates(ev) {
   return out;
 }
 
-function eventTimes(ev) {
-  const out = [];
-  for (let m = toMin(ev.dayStart); m < toMin(ev.dayEnd); m += STEP) out.push(toTime(m));
-  return out;
+// Días que los participantes pueden marcar: los del rango menos los deshabilitados.
+function validDates(ev) {
+  const disabled = new Set(ev.disabledDates);
+  return new Set(eventDates(ev).filter((d) => !disabled.has(d)));
 }
 
-// Slots válidos = días habilitados × horarios del rango.
-function validSlots(ev) {
-  const disabled = new Set(ev.disabledDates);
-  const times = eventTimes(ev);
-  const set = new Set();
-  for (const d of eventDates(ev)) {
-    if (disabled.has(d)) continue;
-    for (const t of times) set.add(d + 'T' + t);
-  }
-  return set;
+// Datos de versiones anteriores, que se elegían por día y hora: la hora confirmada pasa a ser
+// la hora del evento y los horarios marcados ("YYYY-MM-DDTHH:MM") se reducen a sus días.
+function migrate(ev) {
+  if (ev.time === undefined) ev.time = ev.confirmed?.time || '';
+  delete ev.dayStart;
+  delete ev.dayEnd;
+  if (ev.confirmed) ev.confirmed = { date: ev.confirmed.date };
+  return ev;
+}
+function responseDates(r) {
+  return r.dates || [...new Set((r.slots || []).map((s) => s.slice(0, 10)))];
 }
 
 // ---------- validación de configuración de evento ----------
@@ -94,42 +84,36 @@ function applyConfig(ev, body) {
     if (!Number.isInteger(n) || n < 1 || n > 62) throw new Error('La cantidad de días debe estar entre 1 y 62');
     ev.days = n;
   }
-  if ('dayStart' in body) {
-    if (!TIME_RE.test(body.dayStart)) throw new Error('Hora de inicio inválida');
-    ev.dayStart = body.dayStart;
-  }
-  if ('dayEnd' in body) {
-    if (!TIME_RE.test(body.dayEnd)) throw new Error('Hora de fin inválida');
-    ev.dayEnd = body.dayEnd;
+  if ('time' in body) {
+    const t = str(body.time, 5);
+    if (t && !TIME_RE.test(t)) throw new Error('Hora inválida');
+    ev.time = t;
   }
   if ('disabledDates' in body) {
     if (!Array.isArray(body.disabledDates)) throw new Error('disabledDates debe ser una lista');
     ev.disabledDates = body.disabledDates.filter((d) => DATE_RE.test(d));
   }
-  if (toMin(ev.dayEnd) <= toMin(ev.dayStart)) {
-    throw new Error('La hora de fin debe ser posterior a la de inicio');
-  }
   if ('confirmed' in body) {
     const c = body.confirmed;
     if (c === null) ev.confirmed = null;
-    else if (c && validSlots(ev).has(c.date + 'T' + c.time)) ev.confirmed = { date: c.date, time: c.time };
-    else throw new Error('La fecha/hora confirmada no está dentro de los horarios disponibles');
+    else if (c && validDates(ev).has(c.date)) ev.confirmed = { date: c.date };
+    else throw new Error('La fecha confirmada no está entre los días disponibles');
   }
-  // Si cambió la grilla y la fecha confirmada quedó fuera, se anula.
-  if (ev.confirmed && !validSlots(ev).has(ev.confirmed.date + 'T' + ev.confirmed.time)) ev.confirmed = null;
+  // Si cambió el rango y la fecha confirmada quedó fuera, se anula.
+  if (ev.confirmed && !validDates(ev).has(ev.confirmed.date)) ev.confirmed = null;
 }
 
 // Vista pública: oculta los tokens; marca con self:true la respuesta de quien consulta.
-// Las selecciones que quedaron fuera de la grilla actual (días u horas quitados) no se muestran.
+// Los días marcados que quedaron fuera del rango actual (o deshabilitados) no se muestran.
 // Las sugerencias no se incluyen: sólo las ve el admin (adminEvent).
 function publicEvent(ev, token) {
-  const { responses, suggestions, ...rest } = ev;
-  const valid = validSlots(ev);
+  const { responses, suggestions, ...rest } = migrate(ev);
+  const valid = validDates(ev);
   return {
     ...rest,
     responses: Object.entries(responses).map(([t, r]) => ({
       name: r.name,
-      slots: r.slots.filter((s) => valid.has(s)),
+      dates: responseDates(r).filter((d) => valid.has(d)),
       updatedAt: r.updatedAt,
       ...(token && t === token ? { self: true } : {}),
     })),
@@ -208,10 +192,10 @@ async function api(req, res, parts) {
     const name = String(body.name || '').trim().slice(0, 60);
     if (!/^[a-zA-Z0-9-]{16,64}$/.test(token)) return send(res, 400, { error: 'Token inválido' });
     if (!name) return send(res, 400, { error: 'Ingresá tu nombre' });
-    if (!Array.isArray(body.slots)) return send(res, 400, { error: 'slots debe ser una lista' });
-    const valid = validSlots(ev);
-    const slots = [...new Set(body.slots)].filter((s) => valid.has(s)).sort();
-    const resp = { name, slots, updatedAt: new Date().toISOString() };
+    if (!Array.isArray(body.dates)) return send(res, 400, { error: 'dates debe ser una lista' });
+    const valid = validDates(ev);
+    const dates = [...new Set(body.dates)].filter((d) => valid.has(d)).sort();
+    const resp = { name, dates, updatedAt: new Date().toISOString() };
     await store.setResponse(id, token, resp);
     ev.responses[token] = resp;
     return send(res, 200, publicEvent(ev, token));
@@ -235,7 +219,10 @@ async function api(req, res, parts) {
 
     if (!id && req.method === 'GET') {
       const list = (await store.list())
-        .map(({ config: c, responses, suggestions }) => ({ id: c.id, title: c.title, place: c.place, startDate: c.startDate, days: c.days, confirmed: c.confirmed, responses, suggestions, createdAt: c.createdAt }))
+        .map(({ config, responses, suggestions }) => {
+          const c = migrate(config);
+          return { id: c.id, title: c.title, place: c.place, startDate: c.startDate, days: c.days, time: c.time, confirmed: c.confirmed, responses, suggestions, createdAt: c.createdAt };
+        })
         .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
       return send(res, 200, list);
     }
@@ -249,8 +236,7 @@ async function api(req, res, parts) {
         description: '',
         startDate: new Date().toISOString().slice(0, 10),
         days: 14,
-        dayStart: '09:00',
-        dayEnd: '18:00',
+        time: '',
         disabledDates: [],
         confirmed: null,
         createdAt: new Date().toISOString(),
@@ -273,7 +259,7 @@ async function api(req, res, parts) {
 
     if (!sub && req.method === 'PUT') {
       const body = await readBody(req);
-      const { responses, suggestions, ...config } = ev;
+      const { responses, suggestions, ...config } = migrate(ev);
       applyConfig(config, body);
       await store.saveConfig(config);
       return send(res, 200, adminEvent({ ...config, responses, suggestions }));

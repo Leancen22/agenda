@@ -1,11 +1,12 @@
 # Agendas
 
-Coordinación de fecha y hora para una reunión entre grupos. Sin dependencias: sólo Node.js ≥ 18.
+Coordinación de la fecha de una reunión entre grupos. Sin dependencias: sólo Node.js ≥ 18.
 
-- **Admin** (`/admin`): crea el evento (título, lugar, rango de días y rango horario), habilita o deshabilita
-  días en el calendario, ve el mapa de calor de disponibilidad, lee el buzón de sugerencias y confirma la fecha y hora.
-- **Participantes** (`/?e=<id>`, el enlace que muestra el admin): ponen su nombre, eligen días en el calendario
-  y marcan los horarios en que pueden. Pueden volver a editar desde el mismo navegador y dejar comentarios.
+- **Admin** (`/admin`): crea el evento (título, lugar, rango de días y hora opcional), habilita o deshabilita
+  días en el calendario, ve cuántos pueden cada día, lee el buzón de sugerencias y confirma la fecha.
+- **Participantes** (`/?e=<id>`, el enlace que muestra el admin): ponen su nombre y marcan en el calendario los
+  días que pueden, tocándolos de a uno o arrastrando sobre varios. Pueden volver a editar desde el mismo
+  navegador y dejar comentarios.
 
 Al confirmar una fecha, los participantes la ven en un aviso y ya no pueden modificar su disponibilidad
 (el admin puede "Reabrir").
